@@ -2,7 +2,7 @@
 
 ----
 
-This repository contains the official PyTorch implementation of **"AC-Sampler: Accelerate And Correct Diffusion Sampling with Metropolis-Hastings Algorithm"** in [**ICLR 2026**](https://iclr.cc/Conferences/2026).
+This repository contains the official PyTorch implementation of **"AC-Sampler: Accelerate And Correct Diffusion Sampling with Metropolis-Hastings Algorithm"** in [**ICLR 2026**](https://iclr.cc/Conferences/2026). | [**OpenReview**](https://openreview.net/forum?id=kWl13kRJTQ) |
 
 [**Minsang Park**](https://sites.google.com/view/minsang-park/home)$^1$, [**Gyuwon Sim**](https://aai.kaist.ac.kr/bbs/board.php?bo_table=sub2_1&wr_id=27)$^1$, [**Hyeongho Na**](https://sites.google.com/view/asd-lab)$^2$, [**Jiseok Kwak**](https://aai.kaist.ac.kr/bbs/board.php?bo_table=sub2_1&wr_id=26)$^1$, [**Sumin Lee**](https://aai.kaist.ac.kr/bbs/board.php?bo_table=sub2_1&wr_id=18)$^1$, [**Richard Lee Kim**](https://aai.kaist.ac.kr/bbs/board.php?bo_table=sub2_1&wr_id=31)$^1$, [**Donghyeok Shin**](https://sdh0818.github.io/)$^1$, [**Byeonghu Na**](https://sites.google.com/view/byeonghu-na)$^1$, [**Yeongmin Kim**](https://sites.google.com/view/yeongmin-space/)$^1$, and [**Il-Chul Moon**](https://aai.kaist.ac.kr/bbs/board.php?bo_table=sub2_1&wr_id=3)$^{1,3}$
 
@@ -20,14 +20,54 @@ The code is built on [EDM](https://github.com/NVlabs/edm), [DG](https://github.c
 
 ## Overview of the sampler
 
-Sampling follows the deterministic EDM Heun trajectory (18 steps, 35 NFE on CIFAR-10). At a chosen step index `k` (the *branch time*), each image `x_{t_k}` in the batch seeds a Markov chain at the fixed noise level `t_k`:
+Notation follows Sec. 4 of the paper. $\mathbf{s}^{\boldsymbol\theta}(\mathbf{x}_t, t) \approx \nabla_{\mathbf{x}_t} \log q_t(\mathbf{x}_t)$ is the pre-trained score network, $q_t$ and $p^{\boldsymbol\theta}_t$ are the data and model marginals at timestep $t$, and $d^{\boldsymbol\phi}(\mathbf{x}_t, t)$ is a time-dependent discriminator trained to separate $q_t$ from $p^{\boldsymbol\theta}_t$ (Eq. 8, same training scheme as DG). Its output gives the likelihood ratio
 
-1. **Proposal.** A Langevin step `x' = x + (ε²/2)·s(x, t_k) + ε·z`, where `s` is the score from the diffusion model and the step size `ε` is set from a target signal-to-noise ratio (`--snr`).
-2. **Accept / reject.** The MH log-acceptance combines the Langevin proposal-kernel ratio with the discriminator log-ratio `log r(x', t_k) - log r(x, t_k)`, where `r ≈ p_data(x_t) / p_model(x_t)`.
-3. **Collect.** After `--burn_in` accepted moves, every `(--num_skip + 1)`-th accepted state is stored, until `--num_samples_branch` states per chain are collected.
-4. **Denoise.** Collected states are queued and denoised from `t_k` to `0` with the same Heun solver.
+$$L^{\boldsymbol\phi}_t(\mathbf{x}_t, t) := \frac{d^{\boldsymbol\phi}(\mathbf{x}_t, t)}{1 - d^{\boldsymbol\phi}(\mathbf{x}_t, t)} \approx \frac{q_t(\mathbf{x}_t)}{p^{\boldsymbol\theta}_t(\mathbf{x}_t)} .$$
 
-Running the script without `--branch_time` reproduces the vanilla EDM sampler, which serves as the baseline and as the source of generated data for discriminator training.
+**Overall procedure (Sec. 4).** (i) Denoise from the prior down to a target timestep $\tau$ with the base sampler; each $\mathbf{x}_\tau$ is the initial state of an MCMC chain. (ii) Repeatedly draw candidates from a score-based proposal and apply MH correction (Algorithm 1). After a burn-in period the chain samples follow the true marginal $q_\tau$. (iii) Denoise every accepted sample from $\tau$ to $0$ to obtain the outputs. Step (i) is shared by all samples of a chain (*Acceleration Gain*), and step (ii) moves the samples toward $q_\tau$ (*Correction Gain*).
+
+**Proposal distribution (Sec. 4.1, Eq. 5).** MALA with the pre-trained score:
+
+$$p^{\boldsymbol\theta}_{\text{proposal},t}(\cdot \mid \mathbf{x}_t) = \mathcal{N}\!\left(\mathbf{x}_t + \tfrac{\eta}{2}\,\mathbf{s}^{\boldsymbol\theta}(\mathbf{x}_t, t),\ \eta\mathbf{I}\right),
+\qquad \sqrt{\eta} = \text{SNR} \times \frac{2\,\lVert\boldsymbol\epsilon\rVert}{\lVert\mathbf{s}\rVert} \quad \text{(Eq. 68)},$$
+
+where $\boldsymbol\epsilon \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$ is the injected noise. The same score evaluation serves both the denoising step and the proposal.
+
+**Algorithm 1 `MALAOneStep`**
+
+> **Input:** target timestep $\tau$, previous sample $\mathbf{x}_\tau$, score output $\mathbf{s} := \mathbf{s}^{\boldsymbol\theta}(\mathbf{x}_\tau, \tau)$, likelihood ratio $L^{\boldsymbol\phi}_\tau := \frac{d^{\boldsymbol\phi}(\mathbf{x}_\tau, \tau)}{1 - d^{\boldsymbol\phi}(\mathbf{x}_\tau, \tau)}$, score network $\mathbf{s}^{\boldsymbol\theta}$, discriminator $d^{\boldsymbol\phi}$
+> **Output:** next sample $\tilde{\mathbf{x}}_\tau$
+> 1. **repeat**
+> 2. &nbsp;&nbsp;&nbsp;&nbsp;Propose $\tilde{\mathbf{x}}_\tau$ from proposal distribution $p^{\boldsymbol\theta}_{\text{proposal},\tau}(\cdot \mid \mathbf{x}_\tau)$ (Eq. 5)
+> 3. &nbsp;&nbsp;&nbsp;&nbsp;Get score $\tilde{\mathbf{s}} \leftarrow \mathbf{s}^{\boldsymbol\theta}(\tilde{\mathbf{x}}_\tau, \tau)$, and likelihood ratio $\tilde{L}^{\boldsymbol\phi}_\tau \leftarrow \frac{d^{\boldsymbol\phi}(\tilde{\mathbf{x}}_\tau, \tau)}{1 - d^{\boldsymbol\phi}(\tilde{\mathbf{x}}_\tau, \tau)}$
+> 4. &nbsp;&nbsp;&nbsp;&nbsp;Calculate acceptance probability $\alpha \leftarrow \hat\alpha(\mathbf{x}_\tau, \tilde{\mathbf{x}}_\tau, \mathbf{s}, \tilde{\mathbf{s}}, L^{\boldsymbol\phi}_\tau, \tilde{L}^{\boldsymbol\phi}_\tau)$ (Eq. 9)
+> 5. &nbsp;&nbsp;&nbsp;&nbsp;Sample $u \sim \mathcal{U}(0, 1)$
+> 6. **until** $u < \alpha$
+> 7. **return** $\tilde{\mathbf{x}}_\tau, \tilde{\mathbf{s}}, \tilde{L}^{\boldsymbol\phi}_\tau$
+
+**Acceptance probability (Sec. 4.2, Eq. 9).** Using Theorem 4.1 with $\hat{\mathbf{x}}_{t-1} := \tfrac12\big(\mu_t(\mathbf{x}_t, \mathbf{s}) + \mu_t(\tilde{\mathbf{x}}_t, \tilde{\mathbf{s}})\big)$, the intractable ratio $q_t(\tilde{\mathbf{x}}_t)/q_t(\mathbf{x}_t)$ becomes tractable:
+
+$$\hat\alpha(\mathbf{x}_t, \tilde{\mathbf{x}}_t, \mathbf{s}, \tilde{\mathbf{s}}, L, \tilde{L}) = \min\!\left(1,\ \underbrace{\frac{q_{t|t-1}(\tilde{\mathbf{x}}_t \mid \hat{\mathbf{x}}_{t-1})}{q_{t|t-1}(\mathbf{x}_t \mid \hat{\mathbf{x}}_{t-1})}}_{\text{Forward term}} \cdot \underbrace{\frac{\tilde{L}}{L}}_{\text{Likelihood ratio}} \cdot \underbrace{\frac{p^{\boldsymbol\theta}_{\text{proposal},t}(\mathbf{x}_t \mid \tilde{\mathbf{x}}_t)}{p^{\boldsymbol\theta}_{\text{proposal},t}(\tilde{\mathbf{x}}_t \mid \mathbf{x}_t)}}_{\text{Proposal term}}\right).$$
+
+The forward and proposal terms are Gaussians and the likelihood ratio comes from the discriminator, so $\hat\alpha$ is fully tractable.
+
+**Propose-until-accept (Sec. 4.3).** Instead of keeping a rejected proposal as a repeated state, Algorithm 1 redraws proposals until one is accepted and records only accepted samples. This avoids duplicated states in the finite-sample empirical distribution.
+
+**Correspondence with the code** (`ac_sampler` in `generate_ac_sampler.py`):
+
+| Paper | Code | Notes |
+| --- | --- | --- |
+| Base sampler, $T$ steps | EDM Heun, `--steps` | Deterministic on CIFAR-10 (`--S_churn=0`). |
+| Target timestep $\tau$ | `--branch_time` $= T - \tau$ | `--branch_time` is the number of denoising steps taken from the prior before the chain starts, i.e. $\tau$ steps of the schedule remain. Several values can be given as a comma-separated list. |
+| SNR (Eq. 68) | `--snr` | Sets $\sqrt\eta$ per sample. |
+| $n_{\text{burn-in}}$ | `--burn_in` | Accepted states discarded at the start of each chain. |
+| $n_{\text{skip}}$ | `--num_skip` | Keep every $(n_{\text{skip}}+1)$-th accepted state. |
+| $n_{\text{chain}}$ | `--num_samples_branch` | Chain length = number of samples obtained from one initial point (one value per `--branch_time`). |
+| Eq. 5 proposal | `mh_branch` | $\tilde{\mathbf{x}} = \mathbf{x} + \tfrac{\eta}{2}\mathbf{s} + \sqrt\eta\,\boldsymbol\epsilon$; the score at $\tilde{\mathbf{x}}$ is re-used for the next denoising step. |
+| Eq. 9 acceptance | `mh_branch` | $\log\hat\alpha = \log\tilde{L} - \log L + \tfrac{\eta}{8}\left(\lVert\mathbf{s}\rVert^2 - \lVert\tilde{\mathbf{s}}\rVert^2\right)$, where the last term is the closed form of the forward and proposal Gaussian terms. `--do_mh=0` removes the accept/reject test (plain Langevin). |
+| DG$_p$ (Appendix, Table 16) | `--dg_proposal` | Discriminator-guided proposal $\mathbf{s} + w\,\nabla\log L^{\boldsymbol\phi}$; needs a gradient and is slower. |
+
+Running without `--branch_time` reproduces the vanilla EDM sampler, which serves as the baseline and as the source of generated data for discriminator training.
 
 ## Requirements
 
@@ -79,49 +119,55 @@ python train.py \
 
 ## Step 3. AC-Sampler
 
-Hyper-parameters used for CIFAR-10: `--snr=0.23`, `--burn_in=10`, one branch at step `8` collecting `500` states per chain. With a batch of 100 root images this yields `100 × 500 = 50,000` samples.
+Configurations from Table 21 of the paper (unconditional CIFAR-10, EDM + Heun). Remember `--branch_time = T - τ`.
+
+| $T$ | SNR | $n_{\text{chain}}$ | $n_{\text{burn-in}}$ | $n_{\text{skip}}$ | $\tau$ | FID | NFE | Command flags |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 18 | 0.23 | 300 | 10 | 0 | 13 | 1.97 | 26.19 | `--steps=18 --branch_time=5 --num_samples_branch=300 --snr=0.23 --burn_in=10` |
+| 18 | 0.23 | 50 | 10 | 0 | 11 | 2.10 | 22.78 | `--steps=18 --branch_time=7 --num_samples_branch=50 --snr=0.23 --burn_in=10` |
+| 14 | 0.2 | 50 | 0 | 0 | 6 | 2.38 | 15.82 | `--steps=14 --branch_time=8 --num_samples_branch=50 --snr=0.2 --burn_in=0` |
+| 10 | 0.2 | 11 | 0 | 0 | 5 | 3.24 | 10.57 | `--steps=10 --branch_time=5 --num_samples_branch=11 --snr=0.2 --burn_in=0` |
+
+Example (first row):
 
 ```bash
 python generate_ac_sampler.py \
     --network=checkpoints/pretrained_score/edm-cifar10-32x32-uncond-vp.pkl \
     --discriminator_ckpt=checkpoints/discriminator/cifar_uncond/discriminator_60.pt \
-    --outdir=samples/cifar10/ac_sampler_branch8 \
-    --num_samples=50000 --branch_time=8 --num_samples_branch=500 --snr=0.23 --burn_in=10
+    --outdir=samples/cifar10/ac_T18_tau13 --num_samples=50000 \
+    --steps=18 --branch_time=5 --num_samples_branch=300 --snr=0.23 --burn_in=10
 ```
 
-Multiple branch times can be given as comma-separated lists, e.g. `--branch_time=5,10 --num_samples_branch=2,1`.
+Multiple target timesteps can be used at once, e.g. `--branch_time=3,4,5 --num_samples_branch=3,4,5` (Table 21, $\tau = 15, 14, 13$). The chain stops branching automatically once enough samples are queued to reach `--num_samples`.
+
+Other options:
 
 | Option | Meaning |
 | --- | --- |
-| `--branch_time` | Step indices (`0..steps-1`) at which MH chains are run. Smaller index = higher noise level. |
-| `--num_samples_branch` | Number of chain states collected per root image at each branch time. |
-| `--snr` | Target SNR for the Langevin step size. |
-| `--burn_in` | Accepted proposals discarded at the start of each chain. |
-| `--num_skip` | Thinning: keep every `(num_skip+1)`-th accepted state. |
 | `--do_mh` | `0` disables the accept/reject step (plain Langevin). |
-| `--dg_proposal` | Adds discriminator guidance to the score used inside the Langevin proposal. |
-| `--dg_weight` | Discriminator guidance on the ODE drift (DG baseline). |
-| `--steps`, `--S_churn`, ... | Standard EDM sampler options. |
+| `--dg_proposal` | Weight of discriminator guidance inside the Langevin proposal (DG$_p$). |
+| `--dg_weight` | Discriminator guidance on the ODE drift (DG baseline, Kim et al., 2023). |
+| `--S_churn`, `--S_min`, `--S_max`, `--S_noise` | EDM stochastic sampler options (unused for CIFAR-10). |
 
 ## Step 4. Evaluation
 
 FID (EDM protocol, 50k samples):
 
 ```bash
-python fid_npzs.py --images=samples/cifar10/ac_sampler_branch8 --ref=data/cifar10-32x32.npz
+python fid_npzs.py --images=samples/cifar10/ac_T18_tau13 --ref=data/cifar10-32x32.npz
 ```
 
 Precision / Recall / IS with the ADM evaluation suite:
 
 ```bash
-python evaluations/merge_npz.py --samples_dir=samples/cifar10/ac_sampler_branch8 --num_samples=10000
-python evaluations/evaluator.py <reference_batch.npz> samples/cifar10/ac_sampler_branch8/samples_merged.npz
+python evaluations/merge_npz.py --samples_dir=samples/cifar10/ac_T18_tau13 --num_samples=10000
+python evaluations/evaluator.py <reference_batch.npz> samples/cifar10/ac_T18_tau13/samples_merged.npz
 ```
 
 Average NFE per sample:
 
 ```bash
-python summarize_nfe.py samples/cifar10/edm_base samples/cifar10/ac_sampler_branch8
+python summarize_nfe.py samples/cifar10/edm_base samples/cifar10/ac_T18_tau13
 ```
 
 ## Repository layout

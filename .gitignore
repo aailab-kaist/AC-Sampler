@@ -21,3 +21,6 @@ __pycache__/
 .vscode/
 .idea/
 .DS_Store
+
+# Paper PDF (kept locally only)
+*.pdf
