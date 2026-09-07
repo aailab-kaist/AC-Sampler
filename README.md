@@ -20,36 +20,7 @@ The code is built on [EDM](https://github.com/NVlabs/edm), [DG](https://github.c
 
 ## Overview
 
-Let $`\mathbf{s}^{\theta}(\mathbf{x}_t, t) \approx \nabla_{\mathbf{x}_t}\log q_t(\mathbf{x}_t)`$ be the pre-trained score network and $`d^{\phi}(\mathbf{x}_t, t)`$ a time-dependent discriminator trained to separate the data marginal $`q_t`$ from the model marginal $`p^{\theta}_t`$. The discriminator gives the likelihood ratio
-
-```math
-L^{\phi}_t(\mathbf{x}_t, t) := \frac{d^{\phi}(\mathbf{x}_t, t)}{1 - d^{\phi}(\mathbf{x}_t, t)} \approx \frac{q_t(\mathbf{x}_t)}{p^{\theta}_t(\mathbf{x}_t)} .
-```
-
-AC-Sampler (Sec. 4 of the paper) works in three stages: (i) denoise from the prior down to a target timestep $`\tau`$ with the base sampler; (ii) run a Metropolis-adjusted Langevin (MALA) chain at $`\tau`$ (Algorithm 1, `MALAOneStep`); (iii) denoise every accepted sample from $`\tau`$ to $`0`$. Samples of a chain share stage (i) (*Acceleration Gain*) and the MH correction moves them toward $`q_\tau`$ (*Correction Gain*).
-
-**Proposal (Eq. 5).** MALA with the pre-trained score, with the step size $`\eta`$ set from a target signal-to-noise ratio (Eq. 68):
-
-```math
-p^{\theta}_{\text{proposal},t}(\cdot \mid \mathbf{x}_t) = \mathcal{N}\!\left(\mathbf{x}_t + \tfrac{\eta}{2}\,\mathbf{s}^{\theta}(\mathbf{x}_t, t),\ \eta\mathbf{I}\right),
-\qquad
-\sqrt{\eta} = \mathrm{SNR}\times\frac{2\,\lVert\boldsymbol{\epsilon}\rVert}{\lVert\mathbf{s}\rVert}.
-```
-
-**Acceptance probability (Eq. 9).** With $`\hat{\mathbf{x}}_{t-1} := \tfrac{1}{2}\big(\mu_t(\mathbf{x}_t, \mathbf{s}) + \mu_t(\tilde{\mathbf{x}}_t, \tilde{\mathbf{s}})\big)`$, the ratio $`q_t(\tilde{\mathbf{x}}_t)/q_t(\mathbf{x}_t)`$ becomes tractable and
-
-```math
-\hat\alpha(\mathbf{x}_t, \tilde{\mathbf{x}}_t, \mathbf{s}, \tilde{\mathbf{s}}, L, \tilde{L})
-= \min\!\left(1,\
-\underbrace{\frac{q_{t|t-1}(\tilde{\mathbf{x}}_t \mid \hat{\mathbf{x}}_{t-1})}{q_{t|t-1}(\mathbf{x}_t \mid \hat{\mathbf{x}}_{t-1})}}_{\text{Forward term}}
-\cdot
-\underbrace{\frac{\tilde{L}}{L}}_{\text{Likelihood ratio}}
-\cdot
-\underbrace{\frac{p^{\theta}_{\text{proposal},t}(\mathbf{x}_t \mid \tilde{\mathbf{x}}_t)}{p^{\theta}_{\text{proposal},t}(\tilde{\mathbf{x}}_t \mid \mathbf{x}_t)}}_{\text{Proposal term}}
-\right),
-```
-
-where $`\mathbf{s}, \tilde{\mathbf{s}}, L, \tilde{L}`$ denote $`\mathbf{s}^{\theta}(\mathbf{x}_t,t)`$, $`\mathbf{s}^{\theta}(\tilde{\mathbf{x}}_t,t)`$, $`L^{\phi}_t(\mathbf{x}_t,t)`$, $`L^{\phi}_t(\tilde{\mathbf{x}}_t,t)`$. Algorithm 1 follows a propose-until-accept design: proposals are redrawn until one is accepted and only accepted samples are recorded.
+AC-Sampler (Sec. 4 of the paper) works in three stages: (i) denoise from the prior down to a target timestep $`\tau`$ with the base sampler; (ii) run a Metropolis-adjusted Langevin chain at $`\tau`$ (Algorithm 1), where the proposal uses the pre-trained score (Eq. 5) and the acceptance probability (Eq. 9) uses the likelihood ratio $`L^{\phi}_\tau = d^{\phi}/(1-d^{\phi})`$ from a time-dependent discriminator $`d^{\phi}`$; (iii) denoise every accepted sample from $`\tau`$ to $`0`$. Samples of a chain share stage (i) (*Acceleration Gain*) and the MH correction moves them toward the true marginal $`q_\tau`$ (*Correction Gain*).
 
 Correspondence between the paper's hyper-parameters and the options of `generate_ac_sampler.py`:
 
