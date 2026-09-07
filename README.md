@@ -112,7 +112,7 @@ Other options:
 | Option | Meaning |
 | --- | --- |
 | `--do_mh` | `0` disables the accept/reject step (plain Langevin). |
-| `--dg_proposal` | Weight of discriminator guidance inside the Langevin proposal (DG$_p$). |
+| `--dg_proposal` | Weight of discriminator guidance inside the Langevin proposal (DG_p). |
 | `--dg_weight` | Discriminator guidance on the ODE drift (DG baseline, Kim et al., 2023). |
 | `--S_churn`, `--S_min`, `--S_max`, `--S_noise` | EDM stochastic sampler options (unused for CIFAR-10). |
 
