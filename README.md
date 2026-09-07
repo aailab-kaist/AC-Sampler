@@ -18,56 +18,23 @@ This release covers the **CIFAR-10** experiments. AC-Sampler runs Metropolis-adj
 
 The code is built on [EDM](https://github.com/NVlabs/edm), [DG](https://github.com/aailabkaist/DG), and [DiffRS](https://github.com/aailabkaist/DiffRS).
 
-## Overview of the sampler
+## Overview
 
-Notation follows Sec. 4 of the paper. $\mathbf{s}^{\boldsymbol\theta}(\mathbf{x}_t, t) \approx \nabla_{\mathbf{x}_t} \log q_t(\mathbf{x}_t)$ is the pre-trained score network, $q_t$ and $p^{\boldsymbol\theta}_t$ are the data and model marginals at timestep $t$, and $d^{\boldsymbol\phi}(\mathbf{x}_t, t)$ is a time-dependent discriminator trained to separate $q_t$ from $p^{\boldsymbol\theta}_t$ (Eq. 8, same training scheme as DG). Its output gives the likelihood ratio
+AC-Sampler (Sec. 4 of the paper) works in three stages: (i) denoise from the prior down to a target timestep $\tau$ with the base sampler; (ii) run a Metropolis-adjusted Langevin (MALA) chain at $\tau$, where the proposal uses the pre-trained score (Eq. 5) and the acceptance probability (Eq. 9) uses the likelihood ratio $L^{\boldsymbol\phi}_\tau = d^{\boldsymbol\phi}/(1-d^{\boldsymbol\phi})$ from a time-dependent discriminator; (iii) denoise every accepted sample from $\tau$ to $0$. Samples of a chain share stage (i) (*Acceleration Gain*) and the MH correction moves them toward the true marginal $q_\tau$ (*Correction Gain*). Algorithm 1 (`MALAOneStep`) follows a propose-until-accept design: proposals are redrawn until one is accepted and only accepted samples are recorded.
 
-$$L^{\boldsymbol\phi}_t(\mathbf{x}_t, t) := \frac{d^{\boldsymbol\phi}(\mathbf{x}_t, t)}{1 - d^{\boldsymbol\phi}(\mathbf{x}_t, t)} \approx \frac{q_t(\mathbf{x}_t)}{p^{\boldsymbol\theta}_t(\mathbf{x}_t)} .$$
-
-**Overall procedure (Sec. 4).** (i) Denoise from the prior down to a target timestep $\tau$ with the base sampler; each $\mathbf{x}_\tau$ is the initial state of an MCMC chain. (ii) Repeatedly draw candidates from a score-based proposal and apply MH correction (Algorithm 1). After a burn-in period the chain samples follow the true marginal $q_\tau$. (iii) Denoise every accepted sample from $\tau$ to $0$ to obtain the outputs. Step (i) is shared by all samples of a chain (*Acceleration Gain*), and step (ii) moves the samples toward $q_\tau$ (*Correction Gain*).
-
-**Proposal distribution (Sec. 4.1, Eq. 5).** MALA with the pre-trained score:
-
-$$p^{\boldsymbol\theta}_{\text{proposal},t}(\cdot \mid \mathbf{x}_t) = \mathcal{N}\!\left(\mathbf{x}_t + \tfrac{\eta}{2}\,\mathbf{s}^{\boldsymbol\theta}(\mathbf{x}_t, t),\ \eta\mathbf{I}\right),
-\qquad \sqrt{\eta} = \text{SNR} \times \frac{2\,\lVert\boldsymbol\epsilon\rVert}{\lVert\mathbf{s}\rVert} \quad \text{(Eq. 68)},$$
-
-where $\boldsymbol\epsilon \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$ is the injected noise. The same score evaluation serves both the denoising step and the proposal.
-
-**Algorithm 1 `MALAOneStep`**
-
-> **Input:** target timestep $\tau$, previous sample $\mathbf{x}_\tau$, score output $\mathbf{s} := \mathbf{s}^{\boldsymbol\theta}(\mathbf{x}_\tau, \tau)$, likelihood ratio $L^{\boldsymbol\phi}_\tau := \frac{d^{\boldsymbol\phi}(\mathbf{x}_\tau, \tau)}{1 - d^{\boldsymbol\phi}(\mathbf{x}_\tau, \tau)}$, score network $\mathbf{s}^{\boldsymbol\theta}$, discriminator $d^{\boldsymbol\phi}$
-> **Output:** next sample $\tilde{\mathbf{x}}_\tau$
-> 1. **repeat**
-> 2. &nbsp;&nbsp;&nbsp;&nbsp;Propose $\tilde{\mathbf{x}}_\tau$ from proposal distribution $p^{\boldsymbol\theta}_{\text{proposal},\tau}(\cdot \mid \mathbf{x}_\tau)$ (Eq. 5)
-> 3. &nbsp;&nbsp;&nbsp;&nbsp;Get score $\tilde{\mathbf{s}} \leftarrow \mathbf{s}^{\boldsymbol\theta}(\tilde{\mathbf{x}}_\tau, \tau)$, and likelihood ratio $\tilde{L}^{\boldsymbol\phi}_\tau \leftarrow \frac{d^{\boldsymbol\phi}(\tilde{\mathbf{x}}_\tau, \tau)}{1 - d^{\boldsymbol\phi}(\tilde{\mathbf{x}}_\tau, \tau)}$
-> 4. &nbsp;&nbsp;&nbsp;&nbsp;Calculate acceptance probability $\alpha \leftarrow \hat\alpha(\mathbf{x}_\tau, \tilde{\mathbf{x}}_\tau, \mathbf{s}, \tilde{\mathbf{s}}, L^{\boldsymbol\phi}_\tau, \tilde{L}^{\boldsymbol\phi}_\tau)$ (Eq. 9)
-> 5. &nbsp;&nbsp;&nbsp;&nbsp;Sample $u \sim \mathcal{U}(0, 1)$
-> 6. **until** $u < \alpha$
-> 7. **return** $\tilde{\mathbf{x}}_\tau, \tilde{\mathbf{s}}, \tilde{L}^{\boldsymbol\phi}_\tau$
-
-**Acceptance probability (Sec. 4.2, Eq. 9).** Using Theorem 4.1 with $\hat{\mathbf{x}}_{t-1} := \tfrac12\big(\mu_t(\mathbf{x}_t, \mathbf{s}) + \mu_t(\tilde{\mathbf{x}}_t, \tilde{\mathbf{s}})\big)$, the intractable ratio $q_t(\tilde{\mathbf{x}}_t)/q_t(\mathbf{x}_t)$ becomes tractable:
-
-$$\hat\alpha(\mathbf{x}_t, \tilde{\mathbf{x}}_t, \mathbf{s}, \tilde{\mathbf{s}}, L, \tilde{L}) = \min\!\left(1,\ \underbrace{\frac{q_{t|t-1}(\tilde{\mathbf{x}}_t \mid \hat{\mathbf{x}}_{t-1})}{q_{t|t-1}(\mathbf{x}_t \mid \hat{\mathbf{x}}_{t-1})}}_{\text{Forward term}} \cdot \underbrace{\frac{\tilde{L}}{L}}_{\text{Likelihood ratio}} \cdot \underbrace{\frac{p^{\boldsymbol\theta}_{\text{proposal},t}(\mathbf{x}_t \mid \tilde{\mathbf{x}}_t)}{p^{\boldsymbol\theta}_{\text{proposal},t}(\tilde{\mathbf{x}}_t \mid \mathbf{x}_t)}}_{\text{Proposal term}}\right).$$
-
-The forward and proposal terms are Gaussians and the likelihood ratio comes from the discriminator, so $\hat\alpha$ is fully tractable.
-
-**Propose-until-accept (Sec. 4.3).** Instead of keeping a rejected proposal as a repeated state, Algorithm 1 redraws proposals until one is accepted and records only accepted samples. This avoids duplicated states in the finite-sample empirical distribution.
-
-**Correspondence with the code** (`ac_sampler` in `generate_ac_sampler.py`):
+Correspondence between the paper's hyper-parameters and the options of `generate_ac_sampler.py`:
 
 | Paper | Code | Notes |
 | --- | --- | --- |
-| Base sampler, $T$ steps | EDM Heun, `--steps` | Deterministic on CIFAR-10 (`--S_churn=0`). |
-| Target timestep $\tau$ | `--branch_time` $= T - \tau$ | `--branch_time` is the number of denoising steps taken from the prior before the chain starts, i.e. $\tau$ steps of the schedule remain. Several values can be given as a comma-separated list. |
-| SNR (Eq. 68) | `--snr` | Sets $\sqrt\eta$ per sample. |
+| $T$ | `--steps` | Number of base-sampler (EDM Heun) steps. |
+| $\tau$ | `--branch_time` $= T - \tau$ | Denoising steps taken before the chain starts; comma-separated list allowed. |
+| SNR | `--snr` | Langevin step size $\sqrt\eta = \text{SNR}\cdot 2\lVert\boldsymbol\epsilon\rVert/\lVert\mathbf{s}\rVert$. |
 | $n_{\text{burn-in}}$ | `--burn_in` | Accepted states discarded at the start of each chain. |
 | $n_{\text{skip}}$ | `--num_skip` | Keep every $(n_{\text{skip}}+1)$-th accepted state. |
-| $n_{\text{chain}}$ | `--num_samples_branch` | Chain length = number of samples obtained from one initial point (one value per `--branch_time`). |
-| Eq. 5 proposal | `mh_branch` | $\tilde{\mathbf{x}} = \mathbf{x} + \tfrac{\eta}{2}\mathbf{s} + \sqrt\eta\,\boldsymbol\epsilon$; the score at $\tilde{\mathbf{x}}$ is re-used for the next denoising step. |
-| Eq. 9 acceptance | `mh_branch` | $\log\hat\alpha = \log\tilde{L} - \log L + \tfrac{\eta}{8}\left(\lVert\mathbf{s}\rVert^2 - \lVert\tilde{\mathbf{s}}\rVert^2\right)$, where the last term is the closed form of the forward and proposal Gaussian terms. `--do_mh=0` removes the accept/reject test (plain Langevin). |
-| DG$_p$ (Appendix, Table 16) | `--dg_proposal` | Discriminator-guided proposal $\mathbf{s} + w\,\nabla\log L^{\boldsymbol\phi}$; needs a gradient and is slower. |
+| $n_{\text{chain}}$ | `--num_samples_branch` | Chain length, i.e. samples per initial point (one value per `--branch_time`). |
+| DG$_p$ | `--dg_proposal` | Discriminator-guided proposal (Appendix, Table 16). |
 
-Running without `--branch_time` reproduces the vanilla EDM sampler, which serves as the baseline and as the source of generated data for discriminator training.
+Running without `--branch_time` reproduces the vanilla EDM sampler, which is the baseline and the source of generated data for discriminator training.
 
 ## Requirements
 
