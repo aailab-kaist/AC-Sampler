@@ -20,19 +20,48 @@ The code is built on [EDM](https://github.com/NVlabs/edm), [DG](https://github.c
 
 ## Overview
 
-AC-Sampler (Sec. 4 of the paper) works in three stages: (i) denoise from the prior down to a target timestep τ with the base sampler; (ii) run a Metropolis-adjusted Langevin (MALA) chain at τ, where the proposal uses the pre-trained score (Eq. 5) and the acceptance probability (Eq. 9) uses the likelihood ratio L = d / (1 − d) given by a time-dependent discriminator d; (iii) denoise every accepted sample from τ to 0. Samples of a chain share stage (i) (*Acceleration Gain*) and the MH correction moves them toward the true marginal at τ (*Correction Gain*). Algorithm 1 (`MALAOneStep`) follows a propose-until-accept design: proposals are redrawn until one is accepted and only accepted samples are recorded.
+Let $`\mathbf{s}^{\theta}(\mathbf{x}_t, t) \approx \nabla_{\mathbf{x}_t}\log q_t(\mathbf{x}_t)`$ be the pre-trained score network and $`d^{\phi}(\mathbf{x}_t, t)`$ a time-dependent discriminator trained to separate the data marginal $`q_t`$ from the model marginal $`p^{\theta}_t`$. The discriminator gives the likelihood ratio
+
+```math
+L^{\phi}_t(\mathbf{x}_t, t) := \frac{d^{\phi}(\mathbf{x}_t, t)}{1 - d^{\phi}(\mathbf{x}_t, t)} \approx \frac{q_t(\mathbf{x}_t)}{p^{\theta}_t(\mathbf{x}_t)} .
+```
+
+AC-Sampler (Sec. 4 of the paper) works in three stages: (i) denoise from the prior down to a target timestep $`\tau`$ with the base sampler; (ii) run a Metropolis-adjusted Langevin (MALA) chain at $`\tau`$ (Algorithm 1, `MALAOneStep`); (iii) denoise every accepted sample from $`\tau`$ to $`0`$. Samples of a chain share stage (i) (*Acceleration Gain*) and the MH correction moves them toward $`q_\tau`$ (*Correction Gain*).
+
+**Proposal (Eq. 5).** MALA with the pre-trained score, with the step size $`\eta`$ set from a target signal-to-noise ratio (Eq. 68):
+
+```math
+p^{\theta}_{\text{proposal},t}(\cdot \mid \mathbf{x}_t) = \mathcal{N}\!\left(\mathbf{x}_t + \tfrac{\eta}{2}\,\mathbf{s}^{\theta}(\mathbf{x}_t, t),\ \eta\mathbf{I}\right),
+\qquad
+\sqrt{\eta} = \mathrm{SNR}\times\frac{2\,\lVert\boldsymbol{\epsilon}\rVert}{\lVert\mathbf{s}\rVert}.
+```
+
+**Acceptance probability (Eq. 9).** With $`\hat{\mathbf{x}}_{t-1} := \tfrac{1}{2}\big(\mu_t(\mathbf{x}_t, \mathbf{s}) + \mu_t(\tilde{\mathbf{x}}_t, \tilde{\mathbf{s}})\big)`$, the ratio $`q_t(\tilde{\mathbf{x}}_t)/q_t(\mathbf{x}_t)`$ becomes tractable and
+
+```math
+\hat\alpha(\mathbf{x}_t, \tilde{\mathbf{x}}_t, \mathbf{s}, \tilde{\mathbf{s}}, L, \tilde{L})
+= \min\!\left(1,\
+\underbrace{\frac{q_{t|t-1}(\tilde{\mathbf{x}}_t \mid \hat{\mathbf{x}}_{t-1})}{q_{t|t-1}(\mathbf{x}_t \mid \hat{\mathbf{x}}_{t-1})}}_{\text{Forward term}}
+\cdot
+\underbrace{\frac{\tilde{L}}{L}}_{\text{Likelihood ratio}}
+\cdot
+\underbrace{\frac{p^{\theta}_{\text{proposal},t}(\mathbf{x}_t \mid \tilde{\mathbf{x}}_t)}{p^{\theta}_{\text{proposal},t}(\tilde{\mathbf{x}}_t \mid \mathbf{x}_t)}}_{\text{Proposal term}}
+\right),
+```
+
+where $`\mathbf{s}, \tilde{\mathbf{s}}, L, \tilde{L}`$ denote $`\mathbf{s}^{\theta}(\mathbf{x}_t,t)`$, $`\mathbf{s}^{\theta}(\tilde{\mathbf{x}}_t,t)`$, $`L^{\phi}_t(\mathbf{x}_t,t)`$, $`L^{\phi}_t(\tilde{\mathbf{x}}_t,t)`$. Algorithm 1 follows a propose-until-accept design: proposals are redrawn until one is accepted and only accepted samples are recorded.
 
 Correspondence between the paper's hyper-parameters and the options of `generate_ac_sampler.py`:
 
 | Paper | Code | Notes |
 | --- | --- | --- |
-| T | `--steps` | Number of base-sampler (EDM Heun) steps. |
-| τ | `--branch_time` (= T − τ) | Denoising steps taken before the chain starts; comma-separated list allowed. |
-| SNR | `--snr` | Langevin step size: sqrt(η) = SNR · 2‖ε‖ / ‖s‖ (Eq. 68). |
-| n_burn-in | `--burn_in` | Accepted states discarded at the start of each chain. |
-| n_skip | `--num_skip` | Keep every (n_skip + 1)-th accepted state. |
-| n_chain | `--num_samples_branch` | Chain length, i.e. samples per initial point (one value per `--branch_time`). |
-| DG_p | `--dg_proposal` | Discriminator-guided proposal (Appendix, Table 16). |
+| $`T`$ | `--steps` | Number of base-sampler (EDM Heun) steps. |
+| $`\tau`$ | `--branch_time` $`= T - \tau`$ | Denoising steps taken before the chain starts; comma-separated list allowed. |
+| SNR | `--snr` | Controls the Langevin step size $`\eta`$ (Eq. 68). |
+| $`n_{\text{burn-in}}`$ | `--burn_in` | Accepted states discarded at the start of each chain. |
+| $`n_{\text{skip}}`$ | `--num_skip` | Keep every $`(n_{\text{skip}} + 1)`$-th accepted state. |
+| $`n_{\text{chain}}`$ | `--num_samples_branch` | Chain length, i.e. samples per initial point (one value per `--branch_time`). |
+| $`\mathrm{DG}_p`$ | `--dg_proposal` | Discriminator-guided proposal (Appendix, Table 16). |
 
 Running without `--branch_time` reproduces the vanilla EDM sampler, which is the baseline and the source of generated data for discriminator training.
 
@@ -86,9 +115,9 @@ python train.py \
 
 ## Step 3. AC-Sampler
 
-Configurations from Table 21 of the paper (unconditional CIFAR-10, EDM + Heun). Remember `--branch_time` = T − τ.
+Configurations from Table 21 of the paper (unconditional CIFAR-10, EDM + Heun). Remember `--branch_time` $`= T - \tau`$.
 
-| T | SNR | n_chain | n_burn-in | n_skip | τ | FID | NFE | Command flags |
+| $`T`$ | SNR | $`n_{\text{chain}}`$ | $`n_{\text{burn-in}}`$ | $`n_{\text{skip}}`$ | $`\tau`$ | FID | NFE | Command flags |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 18 | 0.23 | 300 | 10 | 0 | 13 | 1.97 | 26.19 | `--steps=18 --branch_time=5 --num_samples_branch=300 --snr=0.23 --burn_in=10` |
 | 18 | 0.23 | 50 | 10 | 0 | 11 | 2.10 | 22.78 | `--steps=18 --branch_time=7 --num_samples_branch=50 --snr=0.23 --burn_in=10` |
@@ -105,14 +134,14 @@ python generate_ac_sampler.py \
     --steps=18 --branch_time=5 --num_samples_branch=300 --snr=0.23 --burn_in=10
 ```
 
-Multiple target timesteps can be used at once, e.g. `--branch_time=3,4,5 --num_samples_branch=3,4,5` (Table 21, τ = 15, 14, 13). The chain stops branching automatically once enough samples are queued to reach `--num_samples`.
+Multiple target timesteps can be used at once, e.g. `--branch_time=3,4,5 --num_samples_branch=3,4,5` (Table 21, $`\tau = 15, 14, 13`$). The chain stops branching automatically once enough samples are queued to reach `--num_samples`.
 
 Other options:
 
 | Option | Meaning |
 | --- | --- |
 | `--do_mh` | `0` disables the accept/reject step (plain Langevin). |
-| `--dg_proposal` | Weight of discriminator guidance inside the Langevin proposal (DG_p). |
+| `--dg_proposal` | Weight of discriminator guidance inside the Langevin proposal ($`\mathrm{DG}_p`$). |
 | `--dg_weight` | Discriminator guidance on the ODE drift (DG baseline, Kim et al., 2023). |
 | `--S_churn`, `--S_min`, `--S_max`, `--S_noise` | EDM stochastic sampler options (unused for CIFAR-10). |
 
